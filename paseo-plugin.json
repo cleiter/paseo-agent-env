@@ -1,0 +1,9 @@
+{
+  "id": "paseo-agent-env",
+  "media": [],
+  "requirements": {
+    "paseo": ">=0.11.2"
+  },
+  "name": "Agent environment",
+  "description": "Loads each project's environment (direnv, mise, any command) into its agents from a checked-in .paseo/plugins/paseo-agent-env/config.json."
+}

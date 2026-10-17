@@ -1,0 +1,30 @@
+{
+  "name": "paseo-agent-env",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Load each project's environment (direnv, mise, any command) into Paseo agents from a checked-in .paseo/plugins/paseo-agent-env/config.json.",
+  "license": "Apache-2.0",
+  "files": [
+    "paseo-plugin.json",
+    "OVERVIEW.md",
+    "LICENSE",
+    "index.client.tsx",
+    "index.server.ts",
+    "server/",
+    "shared/"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@getpaseo/plugin": "0.11.2",
+    "@types/node": "^22.0.0",
+    "@types/react": "~19.2.0",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.0",
+    "zod": "^4.4.3"
+  }
+}
