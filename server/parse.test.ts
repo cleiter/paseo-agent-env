@@ -33,8 +33,26 @@ describe("parseEnvOutput", () => {
     );
   });
 
+  it("rejects log lines that contain = without quoting them", () => {
+    expect(() => parseEnvOutput("Loading config: mode=dev\nA=1")).toThrow(
+      /^expected KEY=VALUE records on stdout; log to stderr instead$/,
+    );
+    // Real names with unusual characters still pass.
+    expect(parseEnvOutput("ProgramFiles(x86)=C:\\P\nBASH_FUNC_f%%=() {  :\n")).toEqual({
+      "ProgramFiles(x86)": "C:\\P",
+      "BASH_FUNC_f%%": "() {  :",
+    });
+  });
+
   it("rejects JSON that is not an object of strings", () => {
     expect(() => parseEnvOutput("[1]")).toThrow();
     expect(() => parseEnvOutput('{"A":{"b":1}}')).toThrow("not a string");
+  });
+
+  it("rejects NUL bytes in JSON without quoting the value", () => {
+    expect(() => parseEnvOutput('{"A":"hunter\\u0000two"}')).toThrow(
+      /^environment JSON value for A contains a NUL byte$/,
+    );
+    expect(() => parseEnvOutput('{"A\\u0000B":"1"}')).toThrow("invalid variable name");
   });
 });

@@ -2,7 +2,7 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { type CheckoutPaths, resolveCheckout } from "./server/checkout";
 import { type AgentEnvConfig, readAgentEnvConfig } from "./server/config";
 import { reloadAgent } from "./server/reload";
-import { AgentEnvCommandError, resolveAgentEnv } from "./server/resolve";
+import { AgentEnvCommandError, mergeLaunchEnv, resolveAgentEnv } from "./server/resolve";
 import { AgentEnvTracker } from "./server/tracker";
 import { addWorktreeCreatedHook } from "./server/worktree-create";
 import { ENV_RELOADED_KIND, ENV_RELOADED_VERSION, type EnvReloadedData } from "./shared/timeline";
@@ -13,16 +13,22 @@ interface Resolution {
   injected: Record<string, string>;
 }
 
-/** Run the configured layers for an agent cwd; null when the checkout has no layers. */
-async function resolveFor(
-  cwd: string,
-  requestEnv: Record<string, string>,
-  signal: AbortSignal,
-): Promise<Resolution | null> {
+/** The checkout around an agent cwd and the config in it. */
+async function loadFor(cwd: string): Promise<Omit<Resolution, "injected">> {
   const checkout = await resolveCheckout(cwd);
   // The working copy in the agent's own checkout, so the config follows the branch and an
   // edit applies on the next launch.
   const config = await readAgentEnvConfig(checkout.worktreePath);
+  return { checkout, config };
+}
+
+/** Run the configured layers; null when the checkout has no layers. */
+async function resolveFor(
+  { checkout, config }: Omit<Resolution, "injected">,
+  cwd: string,
+  requestEnv: Record<string, string>,
+  signal: AbortSignal,
+): Promise<Resolution | null> {
   if (config.layers.length === 0) return null;
 
   try {
@@ -63,7 +69,7 @@ export default function contribute(server: PluginServerContext) {
     // A history session only reads the transcript; a broken .envrc must not hide it.
     if (request.purpose === "history") return undefined;
 
-    const resolution = await resolveFor(request.cwd, request.env, signal);
+    const resolution = await resolveFor(await loadFor(request.cwd), request.cwd, request.env, signal);
     if (!resolution) {
       tracker.forget(request.agentId);
       return undefined;
@@ -76,7 +82,7 @@ export default function contribute(server: PluginServerContext) {
     console.log(
       `agent ${request.agentId} (${request.reason}): injected ${listNames(Object.keys(resolution.injected).sort())}`,
     );
-    return { ...request, env: { ...request.env, ...resolution.injected } };
+    return { ...request, env: mergeLaunchEnv(request.env, resolution.injected) };
   });
 
   // Paseo starts an agent before worktree setup runs, so the first launch can miss variables
@@ -86,17 +92,20 @@ export default function contribute(server: PluginServerContext) {
     const launch = tracker.get(agent.id);
     if (!launch) return;
 
-    let resolution: Resolution | null;
+    let injected: Record<string, string>;
     try {
-      resolution = await resolveFor(launch.cwd, launch.requestEnv, signal);
+      // The flag first: with reloadOnChange off, a turn end runs nothing.
+      const loaded = await loadFor(launch.cwd);
+      if (!loaded.config.reloadOnChange) return;
+      // No layers any more: everything injected at launch has to go.
+      injected = (await resolveFor(loaded, launch.cwd, launch.requestEnv, signal))?.injected ?? {};
     } catch (error) {
       // A reload now would fail the launch and leave the agent stopped. Keep it running.
       console.error(`agent ${agent.id}: re-check failed, not reloading: ${String(error)}`);
       return;
     }
-    if (!resolution || !resolution.config.reloadOnChange) return;
 
-    const names = tracker.reloadReasons(agent.id, resolution.injected);
+    const names = tracker.reloadReasons(agent.id, injected);
     if (names.length === 0) return;
 
     const handle = paseo.agents.ref(agent.id);
@@ -107,8 +116,15 @@ export default function contribute(server: PluginServerContext) {
       return;
     }
 
+    try {
+      await reloadAgent(agent.id, signal);
+    } catch (error) {
+      // Not marked as reloaded, so the next turn end retries instead of taking the same change
+      // for a volatile variable.
+      console.error(`agent ${agent.id}: environment changed (${listNames(names)}), reload failed: ${String(error)}`);
+      return;
+    }
     tracker.markReloaded(agent.id, names);
-    await reloadAgent(agent.id, signal);
     console.log(`agent ${agent.id}: environment changed (${listNames(names)}), reloaded`);
     const data: EnvReloadedData = { names };
     await handle.timeline.append({

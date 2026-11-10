@@ -42,11 +42,15 @@ function parseLayer(value: unknown, index: number, configPath: string): AgentEnv
   if (value !== null && typeof value === "object" && !Array.isArray(value)) {
     const vars: Record<string, string> = {};
     for (const [key, entry] of Object.entries(value)) {
-      if (key.length === 0 || key.includes("=")) {
+      if (key.length === 0 || key.includes("=") || key.includes("\0")) {
         throw new AgentEnvConfigError(configPath, `layers[${index}] has an invalid name "${key}"`);
       }
       if (typeof entry !== "string") {
         throw new AgentEnvConfigError(configPath, `layers[${index}]: "${key}" must be a string`);
+      }
+      if (entry.includes("\0")) {
+        // Never quote the value: it may be a secret.
+        throw new AgentEnvConfigError(configPath, `layers[${index}]: "${key}" contains a NUL byte`);
       }
       vars[key] = entry;
     }

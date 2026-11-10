@@ -32,12 +32,14 @@ export async function runWorktreeCreateCommands(options: {
     PASEO_BRANCH_NAME: worktree.branch,
   });
   // One budget for all commands: Paseo's 30-second limit covers the whole hook.
-  const deadline = Date.now() + (options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const budgetMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const deadline = Date.now() + budgetMs;
   for (const command of config.worktreeCreate) {
     await run(command, {
       cwd: worktree.path,
       env,
-      timeoutMs: Math.max(1, deadline - Date.now()),
+      deadline,
+      budgetMs,
       signal,
     });
   }

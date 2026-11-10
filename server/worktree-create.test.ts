@@ -59,7 +59,14 @@ describe("runWorktreeCreateCommands", () => {
   it("shares one time budget across all commands", async () => {
     configure({ layers: [], worktreeCreate: ["sleep 0.3", "sleep 0.3"] });
     const failure = await runFor(450).catch((error: unknown) => error);
-    expect((failure as AgentEnvCommandError).reason).toMatch(/^timed out/);
+    expect((failure as AgentEnvCommandError).reason).toBe("timed out (450 ms budget)");
+  });
+
+  it("does not start a command once the budget is used up", async () => {
+    configure({ layers: [], worktreeCreate: ["sleep 0.3", "touch never"] });
+    const failure = await runFor(300).catch((error: unknown) => error);
+    expect((failure as AgentEnvCommandError).reason).toBe("timed out (300 ms budget)");
+    expect(() => readFileSync(join(worktree.path, "never"))).toThrow();
   });
 
   it("fails on an invalid config instead of skipping it", async () => {

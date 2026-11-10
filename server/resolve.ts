@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { type ChildProcess, execFile, spawn } from "node:child_process";
 import type { AgentEnvLayer } from "./config";
 import { parseEnvOutput } from "./parse";
 
@@ -80,36 +80,102 @@ export function shellInvocation(command: string): { file: string; args: string[]
   return { file: "bash", args: ["-c", command] };
 }
 
+/**
+ * Kill a command and everything it started. The shell runs in its own process group, so a
+ * child that outlives it cannot keep writing after a timeout, or hold stdout open and stall the
+ * result.
+ */
+function killTree(child: ChildProcess): void {
+  if (child.pid === undefined) return;
+  try {
+    if (process.platform === "win32") {
+      execFile("taskkill", ["/pid", String(child.pid), "/T", "/F"], () => {});
+    } else {
+      process.kill(-child.pid, "SIGKILL");
+    }
+  } catch {
+    // Already gone.
+  }
+}
+
 export function run(
   command: string,
-  options: { cwd: string; env: Record<string, string>; timeoutMs: number; signal?: AbortSignal },
+  options: {
+    cwd: string;
+    env: Record<string, string>;
+    /** When the shared budget runs out, as from Date.now(). */
+    deadline: number;
+    /** The whole budget, for the message: the time left may be much less. */
+    budgetMs: number;
+    signal?: AbortSignal;
+  },
 ): Promise<string> {
   const { file, args } = shellInvocation(command);
+  const { signal } = options;
+  const timedOut = `timed out (${options.budgetMs} ms budget)`;
   return new Promise((resolve, reject) => {
-    execFile(
-      file,
-      args,
-      {
+    const remainingMs = options.deadline - Date.now();
+    if (remainingMs <= 0) {
+      // An earlier command used the budget up; starting this one would only be killed.
+      reject(new AgentEnvCommandError(command, timedOut, ""));
+      return;
+    }
+    let child: ChildProcess;
+    try {
+      child = spawn(file, args, {
         cwd: options.cwd,
         env: options.env,
-        timeout: options.timeoutMs,
-        maxBuffer: MAX_BUFFER,
-        signal: options.signal,
-        encoding: "utf8",
-      },
-      (error, stdout, stderr) => {
-        if (!error) return resolve(stdout);
-        const tail = stderr.length > MAX_STDERR_CHARS ? `...${stderr.slice(-MAX_STDERR_CHARS)}` : stderr;
-        const failure = error as NodeJS.ErrnoException & { killed?: boolean; code?: unknown };
-        let reason: string;
-        if (options.signal?.aborted) reason = "aborted";
-        else if (failure.killed) reason = `timed out after ${options.timeoutMs} ms`;
-        else if (failure.code === "ENOENT") reason = `${file} not found`;
-        else if (typeof failure.code === "number") reason = `exit ${failure.code}`;
-        else reason = "spawn failed";
-        reject(new AgentEnvCommandError(command, reason, tail.trim()));
-      },
-    );
+        stdio: ["ignore", "pipe", "pipe"],
+        // A process group of its own, so killTree reaches the command's children.
+        detached: process.platform !== "win32",
+        windowsHide: true,
+      });
+    } catch {
+      // spawn validates the environment synchronously, and its message quotes the offending
+      // value, which may be a secret.
+      reject(new AgentEnvCommandError(command, "invalid environment", ""));
+      return;
+    }
+
+    let stdout = "";
+    let stderr = "";
+    let stopped: string | undefined;
+    let spawnError: NodeJS.ErrnoException | undefined;
+    const stop = (reason: string) => {
+      if (stopped !== undefined) return;
+      stopped = reason;
+      killTree(child);
+    };
+    const timer = setTimeout(() => stop(timedOut), remainingMs);
+    const onAbort = () => stop("aborted");
+    if (signal?.aborted) stop("aborted");
+    else signal?.addEventListener("abort", onAbort, { once: true });
+
+    child.stdout!.setEncoding("utf8").on("data", (chunk: string) => {
+      stdout += chunk;
+      if (stdout.length > MAX_BUFFER) stop("stdout too large");
+    });
+    child.stderr!.setEncoding("utf8").on("data", (chunk: string) => {
+      // Only the tail goes to the log.
+      stderr = (stderr + chunk).slice(-2 * MAX_STDERR_CHARS);
+    });
+    child.on("error", (error) => {
+      spawnError = error;
+    });
+    // "close", not "exit": stdout is complete only once every holder of the pipe is gone.
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      if (stopped === undefined && spawnError === undefined && code === 0) return resolve(stdout);
+      const tail = stderr.length > MAX_STDERR_CHARS ? `...${stderr.slice(-MAX_STDERR_CHARS)}` : stderr;
+      let reason: string;
+      if (stopped !== undefined) reason = stopped;
+      else if (spawnError?.code === "ENOENT") reason = `${file} not found`;
+      else if (spawnError !== undefined) reason = "spawn failed";
+      else if (code !== null) reason = `exit ${code}`;
+      else reason = "killed by a signal";
+      reject(new AgentEnvCommandError(command, reason, tail.trim()));
+    });
   });
 }
 
@@ -141,8 +207,28 @@ export interface ResolveOptions {
   baseEnv: Record<string, string | undefined>;
   /** Variables every command sees but that are not injected unless a command changes them. */
   contextEnv: Record<string, string>;
+  /** One budget for all command layers: Paseo's 30-second limit covers the whole hook. */
   timeoutMs?: number;
   signal?: AbortSignal;
+}
+
+/**
+ * The launch environment: Paseo's overrides with the plugin's variables on top. On Windows a
+ * plugin `Path` must replace a request `PATH`, not sit beside it where the old value may win.
+ */
+export function mergeLaunchEnv(
+  requestEnv: Record<string, string>,
+  injected: Record<string, string>,
+  caseInsensitive = CASE_INSENSITIVE,
+): Record<string, string> {
+  const merged = { ...requestEnv };
+  if (caseInsensitive) {
+    const names = new Set(Object.keys(injected).map((key) => key.toLowerCase()));
+    for (const key of Object.keys(merged)) {
+      if (names.has(key.toLowerCase())) delete merged[key];
+    }
+  }
+  return { ...merged, ...injected };
 }
 
 /**
@@ -152,7 +238,8 @@ export interface ResolveOptions {
  */
 export async function resolveAgentEnv(options: ResolveOptions): Promise<Record<string, string>> {
   const { layers, cwd, baseEnv, contextEnv, signal } = options;
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const budgetMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const deadline = Date.now() + budgetMs;
   const injected: Record<string, string> = {};
 
   for (const layer of layers) {
@@ -165,7 +252,7 @@ export async function resolveAgentEnv(options: ResolveOptions): Promise<Record<s
 
     const commandEnv = buildCommandEnv(baseEnv, contextEnv, injected);
 
-    const stdout = await run(layer.command, { cwd, env: commandEnv, timeoutMs, signal });
+    const stdout = await run(layer.command, { cwd, env: commandEnv, deadline, budgetMs, signal });
     let printed: Record<string, string | null>;
     try {
       printed = parseEnvOutput(stdout);

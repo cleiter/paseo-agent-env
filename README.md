@@ -68,7 +68,7 @@ This prints the `[env]` block and the tool `PATH` from `mise.toml`. Run `mise tr
 - **Variables for commands.** `PASEO_SOURCE_CHECKOUT_PATH`, `PASEO_WORKTREE_PATH`, `PASEO_AGENT_CWD`, and `PASEO_BRANCH_NAME` when on a branch.
 - **Precedence.** Variables from the plugin win over other launch overrides with the same name. Commands can add and replace variables, but not remove daemon variables.
 - **Failures.** A non-zero exit, a timeout, unparseable output, or an invalid config file stops the launch. The error names the command but never includes its output. The command's stderr goes to `paseo plugin logs paseo-agent-env`, so keep secrets out of stderr.
-- **Timeout.** 25 seconds per command. Paseo aborts the whole hook after 30 seconds.
+- **Timeout.** All commands of a launch share 25 seconds. A timeout stops the command and every process it started. Paseo aborts the whole hook after 30 seconds.
 - **Snapshot.** Commands run once per session open. With `reloadOnChange`, the plugin also checks again after each turn; see below.
 - **Scope.** The agent CLI and everything it starts, including stdio MCP servers. Paseo's own commands and terminals keep the daemon environment. The provider availability check runs before the hook, so the agent CLI itself must be on the daemon's `PATH`.
 - **Windows.** Commands run in PowerShell.
@@ -82,6 +82,8 @@ So the plugin repairs it afterwards. When a turn ends, it runs the layers again.
 - **The first turn still runs without the late variables.** A reload in the middle of a turn would end the turn. To have them from the first turn, write them with `worktreeCreate` (next section). Otherwise make the project's commands re-read the environment, for example `eval "$(direnv export bash)"`.
 - **The re-check costs one run of the layers per turn.** Turn it off with `"reloadOnChange": false`.
 - **Variables that change on every run do not cause reload loops.** A variable that changes again right after the reload meant to fix it is ignored from then on. `DIRENV_*` bookkeeping never counts as a change.
+- **Removing the layers reloads too.** When the file is deleted or `layers` is empty, the agent reloads without the variables it got at launch.
+- **A turn that starts at the moment of a reload ends.** The plugin checks that the agent is idle just before it reloads, but Paseo has no reload-if-idle call, so a prompt sent in that instant is cut short.
 - **A failed re-check does not reload.** It goes to the plugin log, and the agent keeps running with its current environment.
 - **Tracking lives in memory.** After a plugin reload or daemon restart, an agent is checked again only after its next launch.
 - **The reload uses the Paseo CLI.** The plugin SDK has no reload call, so the plugin runs `$PASEO_CLI agent reload <id>`, the same as `paseo agent reload`.

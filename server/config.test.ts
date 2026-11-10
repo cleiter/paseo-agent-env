@@ -38,6 +38,9 @@ describe("parseConfig", () => {
     expect(() => parseConfig({ layers: [{ A: 1 }] }, "p")).toThrow('layers[0]: "A" must be a string');
     expect(() => parseConfig({ layers: ["ok", 42] }, "p")).toThrow("layers[1] must be");
     expect(() => parseConfig({ layers: ["  "] }, "p")).toThrow("empty command");
+    expect(() => parseConfig({ layers: [{ A: "hunter\0two" }] }, "p")).toThrow(
+      /^Invalid p: layers\[0\]: "A" contains a NUL byte$/,
+    );
     expect(() => parseConfig({ layers: [{ "A=B": "x" }] }, "p")).toThrow("invalid name");
   });
 

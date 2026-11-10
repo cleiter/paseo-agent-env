@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 
-const RELOAD_TIMEOUT_MS = 20_000;
+// Above Paseo's 30-second hook limit, in case the CLI waits for the new session to open.
+const RELOAD_TIMEOUT_MS = 40_000;
 
 /**
  * Restart an agent's provider process; the conversation stays. The plugin SDK has no reload
