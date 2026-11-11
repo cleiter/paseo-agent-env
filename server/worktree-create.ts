@@ -1,13 +1,9 @@
-import type { PluginServerContext } from "@getpaseo/plugin/server";
+import type { PluginHookWorktree, PluginServerContext } from "@getpaseo/plugin/server";
 import { readAgentEnvConfig } from "./config";
 import { AgentEnvCommandError, buildCommandEnv, DEFAULT_TIMEOUT_MS, run } from "./resolve";
 
 /** What Paseo's `worktree.create.after` hook passes: the new worktree, already on disk. */
-export interface CreatedWorktree {
-  path: string;
-  branch: string;
-  sourceCheckout: string;
-}
+export type CreatedWorktree = PluginHookWorktree;
 
 /**
  * Run the new worktree's `worktreeCreate` commands, one after another, in the worktree.
@@ -46,40 +42,19 @@ export async function runWorktreeCreateCommands(options: {
   return config.worktreeCreate;
 }
 
-// `server.addHook` and `worktree.create.after` arrived after the SDK version this plugin builds
-// against, so they are typed here and detected at runtime.
-type AddWorktreeCreatedHook = (
-  name: "worktree.create.after",
-  handler: (
-    payload: { worktree: CreatedWorktree },
-    context: { signal: AbortSignal },
-  ) => Promise<void>,
-) => () => void;
-
 export function addWorktreeCreatedHook(server: PluginServerContext): () => void {
-  const registration = server as unknown as { addHook?: AddWorktreeCreatedHook };
-  if (typeof registration.addHook !== "function") {
-    console.log("this Paseo has no worktree.create.after hook; worktreeCreate commands do not run");
-    return () => {};
-  }
-  try {
-    return registration.addHook("worktree.create.after", async ({ worktree }, { signal }) => {
-      try {
-        const commands = await runWorktreeCreateCommands({ worktree, baseEnv: process.env, signal });
-        if (commands.length > 0) {
-          console.log(`worktree ${worktree.path}: ran ${commands.length} worktreeCreate command(s)`);
-        }
-      } catch (error) {
-        if (error instanceof AgentEnvCommandError) {
-          console.error(`${error.message}\ncwd: ${worktree.path}\nstderr: ${error.stderr || "(empty)"}`);
-        }
-        // Paseo removes the worktree, so no agent starts in a half-prepared one.
-        throw error;
+  return server.addHook("worktree.create.after", async ({ worktree }, { signal }) => {
+    try {
+      const commands = await runWorktreeCreateCommands({ worktree, baseEnv: process.env, signal });
+      if (commands.length > 0) {
+        console.log(`worktree ${worktree.path}: ran ${commands.length} worktreeCreate command(s)`);
       }
-    });
-  } catch (error) {
-    // An addHook that does not know this hook name throws.
-    console.log(`worktree.create.after is not available, worktreeCreate commands do not run: ${String(error)}`);
-    return () => {};
-  }
+    } catch (error) {
+      if (error instanceof AgentEnvCommandError) {
+        console.error(`${error.message}\ncwd: ${worktree.path}\nstderr: ${error.stderr || "(empty)"}`);
+      }
+      // Paseo removes the worktree, so no agent starts in a half-prepared one.
+      throw error;
+    }
+  });
 }

@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -7,40 +7,52 @@ import { CONFIG_PATH } from "./server/config";
 
 type Handler = (input: unknown, context: unknown) => Promise<unknown>;
 
-/** The plugin wired to a fake server, with a fake Paseo CLI that records reload calls. */
+/** The plugin wired to a fake server and a fake agent handle that records reloads. */
 function setup(dir: string) {
   const handlers: Record<string, Handler> = {};
   const server = {
-    before: (name: string, handler: Handler) => ((handlers[name] = handler), () => {}),
-    on: (name: string, handler: Handler) => ((handlers[name] = handler), () => {}),
+    addHook: (name: string, handler: Handler) => ((handlers[name] = handler), () => {}),
   };
   const remove = contribute(server as unknown as Parameters<typeof contribute>[0]);
+
+  const signal = new AbortController().signal;
+  const open = (reason: string) =>
+    handlers["agent.open.before"]!(
+      { request: { agentId: "a", cwd: dir, env: {}, purpose: "interactive", reason } },
+      { signal },
+    );
 
   const appended: unknown[] = [];
   const agent = {
     status: "idle",
+    reloads: 0,
+    /** Makes the next reload fail, like a daemon that briefly cannot reopen the session. */
+    failNextReload: false,
     refresh: async () => {},
+    // Like the daemon: a reload reopens the session, which runs the open hook again.
+    reload: async () => {
+      agent.reloads += 1;
+      if (agent.failNextReload) {
+        agent.failNextReload = false;
+        throw new Error("reload failed");
+      }
+      await open("refresh");
+    },
     timeline: { append: async (item: unknown) => void appended.push(item) },
   };
   const paseo = { agents: { ref: () => agent } };
-  const signal = new AbortController().signal;
 
   return {
     agent,
     appended,
     remove,
-    open: () =>
-      handlers["agent.session_open"]!(
-        { request: { agentId: "a", cwd: dir, env: {}, purpose: "launch", reason: "create" } },
-        { signal },
-      ),
-    turnEnded: () => handlers["agent.turn_ended"]!({ agent: { id: "a" } }, { paseo, signal }),
+    open: () => open("create"),
+    turnEnded: () => handlers["agent.turn.after"]!({ agent: { id: "a" } }, { paseo, signal }),
   };
 }
 
 describe("agent-env plugin", () => {
   let dir: string;
-  let previousCli: string | undefined;
   const file = (name: string) => join(dir, name);
   const read = (name: string) => (existsSync(file(name)) ? readFileSync(file(name), "utf8") : "");
   const configure = (config: unknown) => {
@@ -52,21 +64,9 @@ describe("agent-env plugin", () => {
 
   beforeEach(() => {
     dir = realpathSync(mkdtempSync(join(tmpdir(), "agent-env-plugin-")));
-    // Fails once when a `fail` file exists, like a CLI that is briefly unreachable.
-    writeFileSync(
-      file("paseo"),
-      `#!/bin/sh\necho "$@" >> "${dir}/calls"\nif [ -e "${dir}/fail" ]; then rm "${dir}/fail"; exit 1; fi\n`,
-    );
-    chmodSync(file("paseo"), 0o755);
-    previousCli = process.env.PASEO_CLI;
-    process.env.PASEO_CLI = file("paseo");
     writeFileSync(file("port"), "1");
   });
-  afterEach(() => {
-    if (previousCli === undefined) delete process.env.PASEO_CLI;
-    else process.env.PASEO_CLI = previousCli;
-    rmSync(dir, { recursive: true, force: true });
-  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   it("injects the layers at launch", async () => {
     configure({ layers: [PORT_LAYER] });
@@ -80,8 +80,12 @@ describe("agent-env plugin", () => {
     await plugin.open();
     writeFileSync(file("port"), "2");
     await plugin.turnEnded();
-    expect(read("calls")).toBe("agent reload a\n");
+    expect(plugin.agent.reloads).toBe(1);
     expect(plugin.appended).toMatchObject([{ kind: "env-reloaded", data: { names: ["PORT"] } }]);
+
+    // The reload recorded the new environment, so the next turn end has nothing to do.
+    await plugin.turnEnded();
+    expect(plugin.agent.reloads).toBe(1);
   });
 
   it("does not reload a busy agent", async () => {
@@ -91,7 +95,7 @@ describe("agent-env plugin", () => {
     writeFileSync(file("port"), "2");
     plugin.agent.status = "running";
     await plugin.turnEnded();
-    expect(read("calls")).toBe("");
+    expect(plugin.agent.reloads).toBe(0);
   });
 
   it("runs nothing at a turn end with reloadOnChange off", async () => {
@@ -101,7 +105,7 @@ describe("agent-env plugin", () => {
     writeFileSync(file("port"), "2");
     await plugin.turnEnded();
     expect(read("runs")).toBe("run\n");
-    expect(read("calls")).toBe("");
+    expect(plugin.agent.reloads).toBe(0);
   });
 
   it("reloads without the variables when the layers are removed", async () => {
@@ -110,7 +114,7 @@ describe("agent-env plugin", () => {
     await plugin.open();
     rmSync(file(CONFIG_PATH));
     await plugin.turnEnded();
-    expect(read("calls")).toBe("agent reload a\n");
+    expect(plugin.agent.reloads).toBe(1);
     expect(plugin.appended).toMatchObject([{ data: { names: ["PORT"] } }]);
   });
 
@@ -119,13 +123,13 @@ describe("agent-env plugin", () => {
     const plugin = setup(dir);
     await plugin.open();
     writeFileSync(file("port"), "2");
-    writeFileSync(file("fail"), "");
+    plugin.agent.failNextReload = true;
     await plugin.turnEnded();
     expect(plugin.appended).toEqual([]);
 
     // Not taken for a volatile variable: the same change still reloads.
     await plugin.turnEnded();
-    expect(read("calls")).toBe("agent reload a\nagent reload a\n");
+    expect(plugin.agent.reloads).toBe(2);
     expect(plugin.appended).toMatchObject([{ data: { names: ["PORT"] } }]);
   });
 });

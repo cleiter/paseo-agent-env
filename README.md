@@ -86,7 +86,6 @@ So the plugin repairs it afterwards. When a turn ends, it runs the layers again.
 - **A turn that starts at the moment of a reload ends.** The plugin checks that the agent is idle just before it reloads, but Paseo has no reload-if-idle call, so a prompt sent in that instant is cut short.
 - **A failed re-check does not reload.** It goes to the plugin log, and the agent keeps running with its current environment.
 - **Tracking lives in memory.** After a plugin reload or daemon restart, an agent is checked again only after its next launch.
-- **The reload uses the Paseo CLI.** The plugin SDK has no reload call, so the plugin runs `$PASEO_CLI agent reload <id>`, the same as `paseo agent reload`.
 
 ## Prepare new worktrees
 
@@ -104,7 +103,7 @@ So the plugin repairs it afterwards. When a turn ends, it runs the layers again.
 - **A failure stops the creation.** Paseo removes the worktree, so no agent starts in a half-prepared one.
 - **The branch is the placeholder.** Paseo renames a new branch after the first prompt, later than this hook. Key anything that must stay stable on the worktree path, not the branch.
 - **Not on restore.** Paseo does not run the hook when it recreates an archived worktree. Run the same commands from `worktree.setup` too if they must exist there.
-- **Paseo version.** This uses the `worktree.create.after` hook, which is newer than Paseo 0.14.0. On an older Paseo the plugin logs that and skips `worktreeCreate`. For copying gitignored files such as `.env`, use Paseo's built-in `.worktreeinclude` support from the same release instead of a command.
+- **Copying files.** For gitignored files such as `.env`, use Paseo's built-in `.worktreeinclude` instead of a command.
 
 ## Trust
 
@@ -120,4 +119,4 @@ paseo plugin install "$PWD"
 paseo plugin reload paseo-agent-env
 ```
 
-Requires Paseo 0.11.2 or later.
+Requires Paseo 0.15.0 or later.

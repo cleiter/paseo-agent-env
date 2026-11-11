@@ -79,20 +79,6 @@ describe("addWorktreeCreatedHook", () => {
   type Handler = (payload: unknown, context: { signal: AbortSignal }) => Promise<void>;
   const asServer = (value: object) => value as Parameters<typeof addWorktreeCreatedHook>[0];
 
-  it("does nothing on a Paseo without addHook", () => {
-    const remove = addWorktreeCreatedHook(asServer({}));
-    expect(() => remove()).not.toThrow();
-  });
-
-  it("does nothing when addHook does not know the hook", () => {
-    const server = asServer({
-      addHook: () => {
-        throw new Error("Unknown lifecycle hook: worktree.create.after");
-      },
-    });
-    expect(() => addWorktreeCreatedHook(server)()).not.toThrow();
-  });
-
   it("registers worktree.create.after and rethrows a failing command", async () => {
     let registered: { name: string; handler: Handler } | undefined;
     const removed: string[] = [];

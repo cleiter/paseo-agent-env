@@ -1,7 +1,6 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { type CheckoutPaths, resolveCheckout } from "./server/checkout";
 import { type AgentEnvConfig, readAgentEnvConfig } from "./server/config";
-import { reloadAgent } from "./server/reload";
 import { AgentEnvCommandError, mergeLaunchEnv, resolveAgentEnv } from "./server/resolve";
 import { AgentEnvTracker } from "./server/tracker";
 import { addWorktreeCreatedHook } from "./server/worktree-create";
@@ -65,7 +64,7 @@ const listNames = (names: string[]) => names.join(", ") || "nothing";
 export default function contribute(server: PluginServerContext) {
   const tracker = new AgentEnvTracker();
 
-  const removeOpen = server.before("agent.session_open", async ({ request }, { signal }) => {
+  const removeOpen = server.addHook("agent.open.before", async ({ request }, { signal }) => {
     // A history session only reads the transcript; a broken .envrc must not hide it.
     if (request.purpose === "history") return undefined;
 
@@ -88,7 +87,7 @@ export default function contribute(server: PluginServerContext) {
   // Paseo starts an agent before worktree setup runs, so the first launch can miss variables
   // that setup writes. A turn end is the first moment the agent is idle: check again and
   // reload it if the environment changed.
-  const removeTurnEnded = server.on("agent.turn_ended", async ({ agent }, { paseo, signal }) => {
+  const removeTurnEnded = server.addHook("agent.turn.after", async ({ agent }, { paseo, signal }) => {
     const launch = tracker.get(agent.id);
     if (!launch) return;
 
@@ -117,7 +116,8 @@ export default function contribute(server: PluginServerContext) {
     }
 
     try {
-      await reloadAgent(agent.id, signal);
+      // Reopens the session, which runs agent.open.before again with the current environment.
+      await handle.reload();
     } catch (error) {
       // Not marked as reloaded, so the next turn end retries instead of taking the same change
       // for a volatile variable.
@@ -138,9 +138,11 @@ export default function contribute(server: PluginServerContext) {
 
   const removeWorktreeCreated = addWorktreeCreatedHook(server);
 
-  // Not on agent.closed: a reload closes the runtime too, and the reload bookkeeping must
+  // Not on agent.close.after: a reload closes the runtime too, and the reload bookkeeping must
   // survive it.
-  const removeArchived = server.on("agent.archived", ({ agent }) => tracker.forget(agent.id));
+  const removeArchived = server.addHook("agent.archive.after", async ({ agent }) => {
+    tracker.forget(agent.id);
+  });
 
   return () => {
     removeOpen();
